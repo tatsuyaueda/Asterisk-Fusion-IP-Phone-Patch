@@ -1,0 +1,543 @@
+--- /home/tatsuya/asterisk-1.6.2.15/channels/chan_sip.c	2010-11-12 06:57:22.000000000 +0900
++++ ./channels/chan_sip.c	2011-01-11 21:24:01.000000000 +0900
+@@ -539,6 +539,7 @@
+ #define DEFAULT_TRANS_TIMEOUT        -1               /*!< Use default SIP transaction timeout */
+ #define PROVIS_KEEPALIVE_TIMEOUT     60000            /*!< How long to wait before retransmitting a provisional response (rfc 3261 13.3.1.1) */
+ #define MAX_AUTHTRIES                3                /*!< Try authentication three times, then fail */
++#define MAX_AUTHTRIES_F              1
+ 
+ #define SIP_MAX_HEADERS              64               /*!< Max amount of SIP headers to read */
+ #define SIP_MAX_LINES                256              /*!< Max amount of lines in SIP attachment (like SDP) */
+@@ -947,6 +948,7 @@
+ 	allowsubscribe and allowrefer on in sip.conf.
+ */
+ #define ALLOWED_METHODS "INVITE, ACK, CANCEL, OPTIONS, BYE, REFER, SUBSCRIBE, NOTIFY, INFO"
++#define ALLOWED_METHODS_F "INVITE, ACK, CANCEL, BYE"
+ 
+ /*! \brief Standard SIP unsecure port for UDP and TCP from RFC 3261. DO NOT CHANGE THIS */
+ #define STANDARD_SIP_PORT	5060
+@@ -973,7 +975,7 @@
+ #define DEFAULT_MOHINTERPRET    "default"	/*!< The default music class */
+ #define DEFAULT_MOHSUGGEST      ""
+ #define DEFAULT_VMEXTEN 	"asterisk"	/*!< Default voicemail extension */
+-#define DEFAULT_CALLERID 	"asterisk"	/*!< Default caller ID */
++#define DEFAULT_CALLERID 	"Unknown"	/*!< Default caller ID */
+ #define DEFAULT_NOTIFYMIME 	"application/simple-message-summary"
+ #define DEFAULT_ALLOWGUEST	TRUE
+ #define DEFAULT_RTPKEEPALIVE	0		/*!< Default RTPkeepalive setting */
+@@ -1001,6 +1003,7 @@
+ #define DEFAULT_REGEXTENONQUALIFY FALSE
+ #define DEFAULT_T1MIN		100		/*!< 100 MS for minimal roundtrip time */
+ #define DEFAULT_MAX_CALL_BITRATE (384)		/*!< Max bitrate for video */
++#define DEFAULT_FUSIONCOM	TRUE		/*!< Fusion Com. use */
+ #ifndef DEFAULT_USERAGENT
+ #define DEFAULT_USERAGENT "Asterisk PBX"	/*!< Default Useragent: header unless re-defined in sip.conf */
+ #define DEFAULT_SDPSESSION "Asterisk PBX"	/*!< Default SDP session name, (s=) header unless re-defined in sip.conf */
+@@ -1024,6 +1027,7 @@
+                                                     *   a bridged channel on hold */
+ static char default_parkinglot[AST_MAX_CONTEXT]; /*!< Parkinglot */
+ static int default_maxcallbitrate;	/*!< Maximum bitrate for call */
++static int default_fusioncom;		/*!< Fusion Com. use */
+ static struct ast_codec_pref default_prefs;		/*!< Default codec prefs */
+ static unsigned int default_transports;			/*!< Default Transports (enum sip_transport) that are acceptable */
+ static unsigned int default_primary_transport;		/*!< Default primary Transport (enum sip_transport) for outbound connections to devices */
+@@ -1618,6 +1622,7 @@
+ 	int jointnoncodeccapability;            /*!< Joint Non codec capability */
+ 	int redircodecs;			/*!< Redirect codecs */
+ 	int maxcallbitrate;			/*!< Maximum Call Bitrate for Video Calls */	
++	int fusioncom;                          /*!< Fusion Com. use */
+ 	int t38_maxdatagram;			/*!< T.38 FaxMaxDatagram override */
+ 	struct sip_proxy *outboundproxy;	/*!< Outbound proxy for this dialog. Use ref_proxy to set this instead of setting it directly*/
+ 	struct t38properties t38;		/*!< T38 settings */
+@@ -1881,6 +1886,7 @@
+ 	struct ast_dnsmgr_entry *dnsmgr;/*!<  DNS refresh manager for peer */
+ 	struct sockaddr_in addr;	/*!<  IP address of peer */
+ 	int maxcallbitrate;		/*!< Maximum Bitrate for a video call */
++	int fusioncom;			/*!<  Fusion Com. use */
+ 	unsigned int portinuri:1;	/*!< Whether the port should be included in the URI */
+ 
+ 	/* Qualification */
+@@ -4028,7 +4034,10 @@
+ 		ast_channel_unlock(p->owner);
+ 	} else if (p->refer && !p->alreadygone) {
+ 		ast_debug(3, "Finally hanging up channel after transfer: %s\n", p->callid);
+-		transmit_request_with_auth(p, SIP_BYE, 0, XMIT_RELIABLE, 1);
++		if (!p->fusioncom)
++			transmit_request_with_auth(p, SIP_BYE, 0, XMIT_RELIABLE, 1);
++		else
++			transmit_request(p, SIP_BYE, 0, XMIT_RELIABLE, 1);
+ 		append_history(p, "ReferBYE", "Sending BYE on transferer call leg %s", p->callid);
+ 		sip_scheddestroy(p, DEFAULT_TRANS_TIMEOUT);
+ 	} else {
+@@ -6197,7 +6206,10 @@
+ 					textqos = ast_rtp_get_quality(p->trtp, NULL, RTPQOS_SUMMARY);
+ 				/* Send a hangup */
+ 				if (oldowner->_state == AST_STATE_UP) {
+-					transmit_request_with_auth(p, SIP_BYE, 0, XMIT_RELIABLE, 1);
++					if (!p->fusioncom)
++						transmit_request_with_auth(p, SIP_BYE, 0, XMIT_RELIABLE, 1);
++					else
++						transmit_request(p, SIP_BYE, 0, XMIT_RELIABLE, 1);
+ 				}
+ 
+ 				/* Get RTCP quality before end of call */
+@@ -7208,7 +7220,10 @@
+ 
+ 	const char *host = S_OR(pvt->fromdomain, ast_inet_ntoa(pvt->ourip.sin_addr));
+ 	
+-	ast_string_field_build(pvt, callid, "%s@%s", generate_random_string(buf, sizeof(buf)), host);
++	if (!pvt->fusioncom)
++		ast_string_field_build(pvt, callid, "%s@%s", generate_random_string(buf, sizeof(buf)), host);
++	else
++		ast_string_field_build(pvt, callid, "%s@%s", generate_random_string(buf, sizeof(buf)), ast_inet_ntoa(pvt->ourip.sin_addr));
+ 
+ }
+ 
+@@ -7358,6 +7373,7 @@
+ 		if (p->udptl)
+ 			ast_udptl_setqos(p->udptl, global_tos_audio, global_cos_audio);
+ 		p->maxcallbitrate = default_maxcallbitrate;
++		p->fusioncom = default_fusioncom;
+ 		p->autoframing = global_autoframing;
+ 		ast_rtp_codec_setpref(p->rtp, &p->prefs);
+ 	}
+@@ -9297,17 +9313,22 @@
+ 				}
+ 
+ 				/* Add rport to first VIA header if requested */
+-				snprintf(new, sizeof(new), "%s;received=%s;rport=%d%s%s",
+-					leftmost, ast_inet_ntoa(p->recv.sin_addr),
+-					ntohs(p->recv.sin_port),
+-					others ? "," : "", others ? others : "");
++				if (!p->fusioncom) {
++					snprintf(new, sizeof(new), "%s;received=%s;rport=%d%s%s",
++						leftmost, ast_inet_ntoa(p->recv.sin_addr),
++						ntohs(p->recv.sin_port),
++						others ? "," : "", others ? others : "");
++				}
+ 			} else {
+ 				/* We should *always* add a received to the topmost via */
+-				snprintf(new, sizeof(new), "%s;received=%s%s%s",
+-					leftmost, ast_inet_ntoa(p->recv.sin_addr),
+-					others ? "," : "", others ? others : "");
++				if (!p->fusioncom) {
++					snprintf(new, sizeof(new), "%s;received=%s%s%s",
++						leftmost, ast_inet_ntoa(p->recv.sin_addr),
++						others ? "," : "", others ? others : "");
++				}
+ 			}
+-			oh = new;	/* the header to copy */
++			if (!p->fusioncom)
++				oh = new;	/* the header to copy */
+ 		}  /* else add the following via headers untouched */
+ 		add_header(req, field, oh);
+ 		copied++;
+@@ -9547,6 +9568,7 @@
+ {
+ 	char newto[256];
+ 	const char *ot;
++	const char *allowed_methods = p->fusioncom ? ALLOWED_METHODS_F : ALLOWED_METHODS;
+ 
+ 	init_resp(resp, msg);
+ 	copy_via_headers(p, resp, req, "Via");
+@@ -9570,8 +9592,9 @@
+ 	copy_header(resp, req, "CSeq");
+ 	if (!ast_strlen_zero(global_useragent))
+ 		add_header(resp, "Server", global_useragent);
+-	add_header(resp, "Allow", ALLOWED_METHODS);
+-	add_supported_header(p, resp);
++	add_header(resp, "Allow", allowed_methods);
++	if (!p->fusioncom)
++		add_supported_header(p, resp);
+ 
+ 	/* If this is an invite, add Session-Timers related headers if the feature is active for this session */
+ 	if (p->method == SIP_INVITE && p->stimer && p->stimer->st_active == TRUE && p->stimer->st_active_peer_ua == TRUE) {
+@@ -9596,7 +9619,12 @@
+ 			add_header(resp, "Contact", contact);	/* Not when we unregister */
+ 		}
+ 	} else if (!ast_strlen_zero(p->our_contact) && resp_needs_contact(msg, p->method)) {
+-		add_header(resp, "Contact", p->our_contact);
++		if (!p->fusioncom) {
++			add_header(resp, "Contact", p->our_contact);
++		} else {
++			if (strncmp(msg, "100", 3))
++				add_header(resp, "Contact", p->our_contact);
++		}
+ 	}
+ 
+ 	if (!ast_strlen_zero(p->url)) {
+@@ -9674,9 +9702,11 @@
+ 	snprintf(tmp, sizeof(tmp), "%d %s", seqno, sip_methods[sipmethod].text);
+ 
+ 	add_header(req, "Via", p->via);
+-	if (p->route) {
+-		set_destination(p, p->route->hop);
+-		add_route(req, is_strict ? p->route->next : p->route);
++	if (!p->fusioncom) {
++		if (p->route) {
++			set_destination(p, p->route->hop);
++			add_route(req, is_strict ? p->route->next : p->route);
++		}
+ 	}
+ 	add_header(req, "Max-Forwards", DEFAULT_MAX_FORWARDS);
+ 
+@@ -9714,8 +9744,10 @@
+ 	if (!ast_strlen_zero(global_useragent))
+ 		add_header(req, "User-Agent", global_useragent);
+ 
+-	if (!ast_strlen_zero(p->rpid))
+-		add_header(req, "Remote-Party-ID", p->rpid);
++	if (!p->fusioncom) {
++		if (!ast_strlen_zero(p->rpid))
++			add_header(req, "Remote-Party-ID", p->rpid);
++	}
+ 
+ 	if (!ast_strlen_zero(p->url)) {
+ 		add_header(req, "Access-URL", p->url);
+@@ -9754,14 +9786,16 @@
+ 		return -1;
+ 	}
+ 	respprep(&resp, p, msg, req);
+-	/* If we are cancelling an incoming invite for some reason, add information
+-		about the reason why we are doing this in clear text */
+-	if (p->method == SIP_INVITE && msg[0] != '1' && p->owner && p->owner->hangupcause) {
+-		char buf[10];
+-
+-		add_header(&resp, "X-Asterisk-HangupCause", ast_cause2str(p->owner->hangupcause));
+-		snprintf(buf, sizeof(buf), "%d", p->owner->hangupcause);
+-		add_header(&resp, "X-Asterisk-HangupCauseCode", buf);
++	if (!p->fusioncom) {
++		/* If we are cancelling an incoming invite for some reason, add information
++			about the reason why we are doing this in clear text */
++		if (p->method == SIP_INVITE && msg[0] != '1' && p->owner && p->owner->hangupcause) {
++			char buf[10];
++	
++			add_header(&resp, "X-Asterisk-HangupCause", ast_cause2str(p->owner->hangupcause));
++			snprintf(buf, sizeof(buf), "%d", p->owner->hangupcause);
++			add_header(&resp, "X-Asterisk-HangupCauseCode", buf);
++		}
+ 	}
+ 	return send_response(p, &resp, reliable, seqno);
+ }
+@@ -10402,8 +10436,10 @@
+ 
+ 		ast_debug(3, "-- Done with adding codecs to SDP\n");
+ 
+-		if (!p->owner || !ast_internal_timing_enabled(p->owner))
+-			ast_str_append(&a_audio, 0, "a=silenceSupp:off - - - -\r\n");
++		if (!p->fusioncom) {
++			if (!p->owner || !ast_internal_timing_enabled(p->owner))
++				ast_str_append(&a_audio, 0, "a=silenceSupp:off - - - -\r\n");
++		}
+ 
+ 		if (min_audio_packet_size)
+ 			ast_str_append(&a_audio, 0, "a=ptime:%d\r\n", min_audio_packet_size);
+@@ -10666,11 +10702,13 @@
+ static int transmit_reinvite_with_sdp(struct sip_pvt *p, int t38version, int oldsdp)
+ {
+ 	struct sip_request req;
++	const char *allowed_methods = p->fusioncom ? ALLOWED_METHODS_F : ALLOWED_METHODS;
+ 	
+ 	reqprep(&req, p, ast_test_flag(&p->flags[0], SIP_REINVITE_UPDATE) ?  SIP_UPDATE : SIP_INVITE, 0, 1);
+ 
+-	add_header(&req, "Allow", ALLOWED_METHODS);
+-	add_supported_header(p, &req);
++	add_header(&req, "Allow", allowed_methods);
++	if (!p->fusioncom)
++		add_supported_header(p, &req);
+ 	if (sipdebug) {
+ 		if (oldsdp == TRUE)
+ 			add_header(&req, "X-asterisk-Info", "SIP re-invite (Session-Timers)");
+@@ -10957,7 +10995,8 @@
+ 	 * NOTIFY messages will use this function for preparing the request and should
+ 	 * have Route headers present.
+ 	 */
+-	add_route(req, p->route);
++	if (!p->fusioncom)
++		add_route(req, p->route);
+ 
+ 	/* Build Remote Party-ID and From */
+ 	if (ast_test_flag(&p->flags[0], SIP_SENDRPID) && (sipmethod == SIP_INVITE)) {
+@@ -10973,8 +11012,10 @@
+ 	add_header(req, "CSeq", tmp_n);
+ 	if (!ast_strlen_zero(global_useragent))
+ 		add_header(req, "User-Agent", global_useragent);
+-	if (!ast_strlen_zero(p->rpid))
+-		add_header(req, "Remote-Party-ID", p->rpid);
++	if (!p->fusioncom) {
++		if (!ast_strlen_zero(p->rpid))
++			add_header(req, "Remote-Party-ID", p->rpid);
++	}
+ }
+ 
+ /*! \brief Build REFER/INVITE/OPTIONS/SUBSCRIBE message and transmit it 
+@@ -10988,6 +11029,7 @@
+ {
+ 	struct sip_request req;
+ 	struct ast_variable *var;
++	const char *allowed_methods = p->fusioncom ? ALLOWED_METHODS_F : ALLOWED_METHODS;
+ 	
+ 	req.method = sipmethod;
+ 	if (init) {/* Bump branch even on initial requests */
+@@ -11003,7 +11045,8 @@
+ 		
+ 	if (p->options && p->options->auth)
+ 		add_header(&req, p->options->authheader, p->options->auth);
+-	append_date(&req);
++	if (!p->fusioncom)
++		append_date(&req);
+ 	if (sipmethod == SIP_REFER) {	/* Call transfer */
+ 		if (p->refer) {
+ 			char buf[SIPBUFSIZE];
+@@ -11045,8 +11088,9 @@
+ 		add_header(&req, "Min-SE", i2astr);
+ 	}
+ 
+-	add_header(&req, "Allow", ALLOWED_METHODS);
+-	add_supported_header(p, &req);
++	add_header(&req, "Allow", allowed_methods);
++	if (!p->fusioncom)
++		add_supported_header(p, &req);
+ 
+ 	if(p->notify_headers) {
+ 		char buf[512];
+@@ -11730,6 +11774,8 @@
+ 	int res;
+ 	char *fromdomain;
+ 	char *domainport = NULL;
++	char callidcopy[MAXHOSTNAMELEN];
++	char *wk = NULL;
+ 
+ 	/* exit if we are already in process with this registrar ?*/
+ 	if (r == NULL || ((auth == NULL) && (r->regstate == REG_STATE_REGSENT || r->regstate == REG_STATE_AUTHSENT))) {
+@@ -11798,7 +11844,8 @@
+ 		}
+ 
+ 		/* Copy back Call-ID in case create_addr changed it */
+-		ast_string_field_set(r, callid, p->callid);
++		if (!p->fusioncom)
++			ast_string_field_set(r, callid, p->callid);
+ 		if (!r->dnsmgr && r->portno) {
+ 			p->sa.sin_port = htons(r->portno);
+  			p->recv.sin_port = htons(r->portno);
+@@ -11842,6 +11889,16 @@
+ 		 */
+ 		ast_sip_ouraddrfor(&p->sa.sin_addr, &p->ourip, p);
+ 		build_contact(p);
++		if (p->fusioncom) {
++			ast_copy_string(callidcopy, r->callid, sizeof(callidcopy));
++			wk = strrchr(callidcopy, '@');
++			if (wk) {
++				*wk++ = '\0';
++				ast_string_field_build(p, callid, "%s@%s", callidcopy, ast_inet_ntoa(p->ourip.sin_addr));
++			}
++			/* Copy back Call-ID in case create_addr changed it */
++			ast_string_field_set(r, callid, p->callid);
++		}
+ 	}
+ 
+ 	/* set up a timeout */
+@@ -11945,10 +12002,12 @@
+ 		p->noncecount = ++r->noncecount;
+ 
+ 		memset(digest, 0, sizeof(digest));
+-		if(!build_reply_digest(p, sipmethod, digest, sizeof(digest)))
+-			add_header(&req, "Authorization", digest);
+-		else
+-			ast_log(LOG_NOTICE, "No authorization available for authentication of registration to %s@%s\n", r->username, r->hostname);
++		if (!p->fusioncom) {
++			if(!build_reply_digest(p, sipmethod, digest, sizeof(digest)))
++				add_header(&req, "Authorization", digest);
++			else
++				ast_log(LOG_NOTICE, "No authorization available for authentication of registration to %s@%s\n", r->username, r->hostname);
++		}
+ 	
+ 	}
+ 
+@@ -12002,6 +12061,7 @@
+ 	char *ttag, *ftag;
+ 	char *theirtag = ast_strdupa(p->theirtag);
+ 	int	use_tls=FALSE;
++	const char *allowed_methods = p->fusioncom ? ALLOWED_METHODS_F : ALLOWED_METHODS;
+ 
+ 	if (sipdebug)
+ 		ast_debug(1, "SIP transfer of %s to %s\n", p->callid, dest);
+@@ -12047,10 +12107,12 @@
+ 	reqprep(&req, p, SIP_REFER, 0, 1);
+ 
+ 	add_header(&req, "Refer-To", referto);
+-	add_header(&req, "Allow", ALLOWED_METHODS);
+-	add_supported_header(p, &req);
+-	if (!ast_strlen_zero(p->our_contact))
+-		add_header(&req, "Referred-By", p->our_contact);
++	add_header(&req, "Allow", allowed_methods);
++	if (!p->fusioncom) {
++		add_supported_header(p, &req);
++		if (!ast_strlen_zero(p->our_contact))
++			add_header(&req, "Referred-By", p->our_contact);
++	}
+ 
+ 	return send_request(p, &req, XMIT_RELIABLE, p->ocseq);
+ 
+@@ -14276,6 +14338,7 @@
+ 		if (p->peercapability)
+ 			p->jointcapability &= p->peercapability;
+ 		p->maxcallbitrate = peer->maxcallbitrate;
++		p->fusioncom = peer->fusioncom;
+ 		if (!ast_test_flag(&p->flags[1], SIP_PAGE2_VIDEOSUPPORT_ALWAYS) &&
+ 				(!ast_test_flag(&p->flags[1], SIP_PAGE2_VIDEOSUPPORT) ||
+ 					!(p->capability & AST_FORMAT_VIDEO_MASK)) &&
+@@ -15629,6 +15692,7 @@
+ 		ast_cli(fd, "  Dynamic      : %s\n", cli_yesno(peer->host_dynamic));
+ 		ast_cli(fd, "  Callerid     : %s\n", ast_callerid_merge(cbuf, sizeof(cbuf), peer->cid_name, peer->cid_num, "<unspecified>"));
+ 		ast_cli(fd, "  MaxCallBR    : %d kbps\n", peer->maxcallbitrate);
++		ast_cli(fd, "  Fusion Com.  : %s\n", peer->fusioncom ? "Yes" : "No");
+ 		ast_cli(fd, "  Expire       : %ld\n", ast_sched_when(sched, peer->expire));
+ 		ast_cli(fd, "  Insecure     : %s\n", insecure2str(ast_test_flag(&peer->flags[0], SIP_INSECURE)));
+ 		ast_cli(fd, "  Nat          : %s\n", nat2str(ast_test_flag(&peer->flags[0], SIP_NAT)));
+@@ -15735,6 +15799,7 @@
+ 		astman_append(s, "Call-limit: %d\r\n", peer->call_limit);
+ 		astman_append(s, "Busy-level: %d\r\n", peer->busy_level);
+ 		astman_append(s, "MaxCallBR: %d kbps\r\n", peer->maxcallbitrate);
++		astman_append(s, "Fusion Com.: %s\r\n", peer->fusioncom ? "Yes" : "No");
+ 		astman_append(s, "Dynamic: %s\r\n", peer->host_dynamic?"Y":"N");
+ 		astman_append(s, "Callerid: %s\r\n", ast_callerid_merge(cbuf, sizeof(cbuf), peer->cid_name, peer->cid_num, ""));
+ 		astman_append(s, "RegExpire: %ld seconds\r\n", ast_sched_when(sched, peer->expire));
+@@ -15876,6 +15941,7 @@
+ 		ast_cli(a->fd, "  AMA flags    : %s\n", ast_cdr_flags2str(user->amaflags));
+ 		ast_cli(a->fd, "  Transfer mode: %s\n", transfermode2str(user->allowtransfer));
+ 		ast_cli(a->fd, "  MaxCallBR    : %d kbps\n", user->maxcallbitrate);
++		ast_cli(a->fd, "  Fusion Com.  : %s\n", user->fusioncom ? "Yes" : "No");
+ 		ast_cli(a->fd, "  CallingPres  : %s\n", ast_describe_caller_presentation(user->callingpres));
+ 		ast_cli(a->fd, "  Call limit   : %d\n", user->call_limit);
+ 		ast_cli(a->fd, "  Callgroup    : ");
+@@ -16284,6 +16350,7 @@
+ 	ast_cli(a->fd, "  Notify hold state:      %s\n", cli_yesno(sip_cfg.notifyhold));
+ 	ast_cli(a->fd, "  SIP Transfer mode:      %s\n", transfermode2str(sip_cfg.allowtransfer));
+ 	ast_cli(a->fd, "  Max Call Bitrate:       %d kbps\n", default_maxcallbitrate);
++	ast_cli(a->fd, "  Fusion Com.:            %s\n", default_fusioncom ? "Yes" : "No");
+ 	ast_cli(a->fd, "  Auto-Framing:           %s\n", cli_yesno(global_autoframing));
+ 	ast_cli(a->fd, "  Outb. proxy:            %s %s\n", ast_strlen_zero(sip_cfg.outboundproxy.name) ? "<not set>" : sip_cfg.outboundproxy.name,
+ 							sip_cfg.outboundproxy.force ? "(forced)" : "");
+@@ -16666,6 +16733,7 @@
+ 			ast_cli(a->fd, "  T.38 support            %s\n", cli_yesno(cur->udptl != NULL));
+ 			ast_cli(a->fd, "  Video support           %s\n", cli_yesno(cur->vrtp != NULL));
+ 			ast_cli(a->fd, "  MaxCallBR:              %d kbps\n", cur->maxcallbitrate);
++			ast_cli(a->fd, "  Fusion Com.:            %s\n", cur->fusioncom ? "Yes" : "No");
+ 			ast_cli(a->fd, "  Theoretical Address:    %s:%d\n", ast_inet_ntoa(cur->sa.sin_addr), ntohs(cur->sa.sin_port));
+ 			ast_cli(a->fd, "  Received Address:       %s:%d\n", ast_inet_ntoa(cur->recv.sin_addr), ntohs(cur->recv.sin_port));
+ 			ast_cli(a->fd, "  SIP Transfer mode:      %s\n", transfermode2str(cur->allowtransfer));
+@@ -17752,7 +17820,10 @@
+ 				ast_softhangup_nolock(p->owner, AST_SOFTHANGUP_DEV);
+ 			}
+ 			/* Perhaps there is an SD change INVITE outstanding */
+-			transmit_request_with_auth(p, SIP_BYE, 0, XMIT_RELIABLE, TRUE);
++			if (!p->fusioncom)
++				transmit_request_with_auth(p, SIP_BYE, 0, XMIT_RELIABLE, TRUE);
++			else
++				transmit_request(p, SIP_BYE, 0, XMIT_RELIABLE, TRUE);
+ 		}
+ 		ast_clear_flag(&p->flags[0], SIP_PENDINGBYE);	
+ 		sip_scheddestroy(p, DEFAULT_TRANS_TIMEOUT);
+@@ -17989,9 +18060,10 @@
+ 		/* Then we AUTH */
+ 		ast_string_field_set(p, theirtag, NULL);	/* forget their old tag, so we don't match tags when getting response */
+ 		if (!req->ignore) {
+-			if (p->authtries < MAX_AUTHTRIES)
++			int max_authtries = p->fusioncom ? MAX_AUTHTRIES_F : MAX_AUTHTRIES;
++			if (p->authtries < max_authtries)
+ 				p->invitestate = INV_CALLING;
+-			if (p->authtries == MAX_AUTHTRIES || do_proxy_auth(p, req, resp, SIP_INVITE, 1)) {
++			if ((p->authtries == max_authtries) || do_proxy_auth(p, req, resp, SIP_INVITE, 1)) {
+ 				ast_log(LOG_NOTICE, "Failed to authenticate on INVITE to '%s'\n", get_header(&p->initreq, "From"));
+ 				pvt_set_needdestroy(p, "failed to authenticate on INVITE");
+ 				sip_alreadygone(p);
+@@ -18284,6 +18356,7 @@
+ 	int expires, expires_ms;
+ 	struct sip_registry *r;
+ 	r=p->registry;
++	int max_authtries = p->fusioncom ? MAX_AUTHTRIES_F : MAX_AUTHTRIES;
+ 	
+ 	switch (resp) {
+ 	case 401:	/* Unauthorized */
+@@ -18307,7 +18380,7 @@
+ 		AST_SCHED_DEL_UNREF(sched, r->timeout, registry_unref(r, "reg ptr unref from handle_response_register 404"));
+ 		break;
+ 	case 407:	/* Proxy auth */
+-		if (p->authtries == MAX_AUTHTRIES || do_register_auth(p, req, resp)) {
++		if (p->authtries == max_authtries || do_register_auth(p, req, resp)) {
+ 			ast_log(LOG_NOTICE, "Failed to authenticate on REGISTER to '%s' (tries '%d')\n", get_header(&p->initreq, "From"), p->authtries);
+ 			pvt_set_needdestroy(p, "failed to authenticate REGISTER");
+ 		}
+@@ -18407,7 +18480,10 @@
+ 		if (expires <= EXPIRY_GUARD_LIMIT)
+ 			expires_ms -= MAX((expires_ms * EXPIRY_GUARD_PCT), EXPIRY_GUARD_MIN);
+ 		else
+-			expires_ms -= EXPIRY_GUARD_SECS * 1000;
++			if (!p->fusioncom)
++				expires_ms -= EXPIRY_GUARD_SECS * 1000;
++			else
++				expires_ms -= (expires * 0.5) * 1000;
+ 		if (sipdebug)
+ 			ast_log(LOG_NOTICE, "Outbound Registration: Expiry for %s is %d sec (Scheduling reregistration in %d s)\n", r->hostname, expires, expires_ms/1000); 
+ 		
+@@ -18503,6 +18579,7 @@
+ 	char *c_copy = ast_strdupa(c);
+ 	/* Skip the Cseq and its subsequent spaces */
+ 	const char *msg = ast_skip_blanks(ast_skip_nonblanks(c_copy));
++	int max_authtries = p->fusioncom ? MAX_AUTHTRIES_F : MAX_AUTHTRIES;
+ 
+ 	if (!msg)
+ 		msg = "";
+@@ -18871,7 +18948,7 @@
+ 			else if (sipmethod == SIP_INVITE) 
+ 				handle_response_invite(p, resp, rest, req, seqno);
+ 			else if (sipmethod == SIP_BYE) {
+-				if (p->authtries == MAX_AUTHTRIES || do_proxy_auth(p, req, resp, sipmethod, 0)) {
++				if (p->authtries == max_authtries || do_proxy_auth(p, req, resp, sipmethod, 0)) {
+ 					ast_log(LOG_NOTICE, "Failed to authenticate on %s to '%s'\n", msg, get_header(&p->initreq, "From"));
+ 					pvt_set_needdestroy(p, "failed to authenticate BYE");
+ 				}
+@@ -23874,6 +23951,7 @@
+ 	peer->defaddr.sin_family = AF_INET;
+ 	peer->capability = global_capability;
+ 	peer->maxcallbitrate = default_maxcallbitrate;
++	peer->fusioncom = default_fusioncom;
+ 	peer->rtptimeout = global_rtptimeout;
+ 	peer->rtpholdtimeout = global_rtpholdtimeout;
+ 	peer->rtpkeepalive = global_rtpkeepalive;
+@@ -24316,6 +24394,8 @@
+ 				if (peer->maxcallbitrate < 0) {
+ 					peer->maxcallbitrate = default_maxcallbitrate;
+ 				}
++			} else if (!strcasecmp(v->name, "fusioncom")) {
++				peer->fusioncom = ast_true(v->value);
+ 			} else if (!strcasecmp(v->name, "session-timers")) {
+ 				int i = (int) str2stmode(v->value);
+ 				if (i < 0) {
+@@ -24760,6 +24840,7 @@
+ 	default_fromdomain[0] = '\0';
+ 	default_qualify = DEFAULT_QUALIFY;
+ 	default_maxcallbitrate = DEFAULT_MAX_CALL_BITRATE;
++	default_fusioncom = DEFAULT_FUSIONCOM;
+ 	ast_copy_string(default_mohinterpret, DEFAULT_MOHINTERPRET, sizeof(default_mohinterpret));
+ 	ast_copy_string(default_mohsuggest, DEFAULT_MOHSUGGEST, sizeof(default_mohsuggest));
+ 	ast_copy_string(default_vmexten, DEFAULT_VMEXTEN, sizeof(default_vmexten));
+@@ -25170,6 +25251,8 @@
+ 				default_maxcallbitrate = DEFAULT_MAX_CALL_BITRATE;
+ 		} else if (!strcasecmp(v->name, "matchexterniplocally")) {
+ 			sip_cfg.matchexterniplocally = ast_true(v->value);
++		} else if (!strcasecmp(v->name, "fusioncom")) {
++			default_fusioncom = ast_true(v->value);
+ 		} else if (!strcasecmp(v->name, "session-timers")) {
+ 			int i = (int) str2stmode(v->value); 
+ 			if (i < 0) {
+@@ -25903,7 +25986,7 @@
+ 		return;
+ 	regspacing = default_expiry * 1000/regobjs;
+ 	if (regspacing > 100)
+-		regspacing = 100;
++		regspacing = 100 * 10;
+ 	ms = regspacing;
+ 	ASTOBJ_CONTAINER_TRAVERSE(&regl, 1, do {
+ 		ASTOBJ_WRLOCK(iterator);
